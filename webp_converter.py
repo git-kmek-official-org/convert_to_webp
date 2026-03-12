@@ -58,7 +58,7 @@ class App(tk.Tk):
         self.title("WebP Converter")
         self.configure(bg=BG)
         self.resizable(True, True)
-        self.minsize(680, 540)
+        self.minsize(500, 230)
         self._apply_style()
         self._build_ui()
         initial_dir = os.path.dirname(os.path.abspath(__file__))
@@ -97,7 +97,7 @@ class App(tk.Tk):
 
         s.configure("TScale",
             background=SURFACE, troughcolor=BORDER,
-            sliderlength=18, sliderrelief="flat")
+            sliderlength=28, sliderrelief="flat")
         s.map("TScale", background=[("active", ACCENT)])
 
     # ── UI構築 ──────────────────────────────────────────────
@@ -115,8 +115,35 @@ class App(tk.Tk):
         tk.Label(hdr, text="JPG / PNG / GIF → WebP", bg=SURFACE, fg=FG_DIM,
                  font=(FONT, 9)).pack(side="left")
 
+        # ── フッター（常に表示・先にパック） ────────────────
+        footer = tk.Frame(self, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=18, pady=(0, 14))
+
+        self.progress = ttk.Progressbar(footer, mode="determinate")
+        self.progress.pack(fill="x", pady=(0, 10))
+
+        bottom = tk.Frame(footer, bg=BG)
+        bottom.pack(fill="x")
+
+        self.status_var = tk.StringVar(value="フォルダを選択してください")
+        tk.Label(bottom, textvariable=self.status_var, anchor="w",
+                 bg=BG, fg=FG_DIM, font=FONT_XS
+                 ).pack(side="left", fill="x", expand=True)
+
+        btn_row = tk.Frame(bottom, bg=BG)
+        btn_row.pack(side="right")
+
+        self.convert_btn = self._btn(btn_row, "変換開始", self._start_convert, primary=True)
+        self.convert_btn.pack(side="left", padx=(0, 8))
+
+        self.folder_btn = self._btn(btn_row, "フォルダを開く", lambda: None, primary=True)
+
+        self.close_btn = self._btn(btn_row, "閉じる", self.destroy, muted=True)
+        self.close_btn.pack(side="left")
+
+        # ── body（ファイル一覧が縮む） ──────────────────────
         body = tk.Frame(self, bg=BG)
-        body.pack(fill="both", expand=True, padx=18, pady=14)
+        body.pack(fill="both", expand=True, padx=18, pady=(14, 0))
 
         # ── フォルダ選択エリア ──────────────────────────────
         dir_outer = tk.Frame(body, bg=BORDER, padx=1, pady=1)
@@ -182,20 +209,51 @@ class App(tk.Tk):
         tk.Label(opt_row, text="低品質", bg=SURFACE, fg=FG_DIM,
                  font=FONT_XS).pack(side="left", padx=(0, 4))
 
-        self.quality_var = tk.IntVar(value=WEBP_QUALITY)
+        self.quality_var = tk.DoubleVar(value=WEBP_QUALITY)
         ttk.Scale(opt_row, from_=1, to=100, orient="horizontal",
-                  variable=self.quality_var, length=180
+                  variable=self.quality_var, length=200
                   ).pack(side="left")
 
         tk.Label(opt_row, text="高品質", bg=SURFACE, fg=FG_DIM,
                  font=FONT_XS).pack(side="left", padx=(4, 10))
 
-        self.quality_label = tk.Label(opt_row, text=str(WEBP_QUALITY),
-                                      bg=ACCENT, fg="white", width=4,
-                                      font=(FONT, 10, "bold"))
-        self.quality_label.pack(side="left", padx=(0, 22))
-        self.quality_var.trace_add("write",
-            lambda *_: self.quality_label.config(text=str(self.quality_var.get())))
+        # キーボード入力対応の品質表示欄
+        self.quality_entry = tk.Entry(opt_row, width=4, justify="center",
+                                      font=(FONT, 10, "bold"),
+                                      bg=ACCENT, fg="white",
+                                      relief="flat", bd=4,
+                                      insertbackground="white")
+        self.quality_entry.insert(0, str(WEBP_QUALITY))
+        self.quality_entry.pack(side="left", padx=(0, 22))
+
+        def _slider_to_entry(*_):
+            v = round(self.quality_var.get())
+            self.quality_entry.delete(0, "end")
+            self.quality_entry.insert(0, str(v))
+
+        def _entry_to_slider(event=None):
+            try:
+                v = max(1, min(100, int(self.quality_entry.get())))
+                self.quality_var.set(v)
+                self.quality_entry.delete(0, "end")
+                self.quality_entry.insert(0, str(v))
+            except ValueError:
+                _slider_to_entry()
+
+        def _nudge(delta):
+            try:
+                v = max(1, min(100, int(self.quality_entry.get()) + delta))
+            except ValueError:
+                v = round(self.quality_var.get())
+            self.quality_var.set(v)
+
+        self.quality_var.trace_add("write", _slider_to_entry)
+        self.quality_entry.bind("<Return>",    _entry_to_slider)
+        self.quality_entry.bind("<FocusOut>",  _entry_to_slider)
+        self.quality_entry.bind("<Up>",        lambda e: (_nudge(1),  "break")[1])
+        self.quality_entry.bind("<Down>",      lambda e: (_nudge(-1), "break")[1])
+        self.quality_entry.bind("<Shift-Up>",  lambda e: (_nudge(10), "break")[1])
+        self.quality_entry.bind("<Shift-Down>",lambda e: (_nudge(-10),"break")[1])
 
         # 区切り線
         tk.Frame(opt_row, bg=BORDER, width=1).pack(side="left", fill="y", padx=(0, 16))
@@ -207,23 +265,6 @@ class App(tk.Tk):
                        activebackground=SURFACE, activeforeground=FG,
                        font=FONT_SM).pack(side="left")
 
-        # ── プログレスバー ──────────────────────────────────
-        self.progress = ttk.Progressbar(body, mode="determinate")
-        self.progress.pack(fill="x", pady=(0, 10))
-
-        # ── ステータス + ボタン ─────────────────────────────
-        bottom = tk.Frame(body, bg=BG)
-        bottom.pack(fill="x")
-
-        self.status_var = tk.StringVar(value="フォルダを選択してください")
-        tk.Label(bottom, textvariable=self.status_var, anchor="w",
-                 bg=BG, fg=FG_DIM, font=FONT_XS
-                 ).pack(side="left", fill="x", expand=True)
-
-        self.close_btn = self._btn(bottom, "閉じる", self.destroy, muted=True)
-        self.close_btn.pack(side="right", padx=(8, 0))
-        self.convert_btn = self._btn(bottom, "変換開始", self._start_convert, primary=True)
-        self.convert_btn.pack(side="right")
 
     # ── ボタンファクトリ ─────────────────────────────────────
     def _btn(self, parent, text, command, primary=False, muted=False):
@@ -329,30 +370,18 @@ class App(tk.Tk):
             self.after(0, messagebox.showinfo, "変換完了", msg)
 
     def _on_convert_done(self):
-        """変換完了後: 変換開始ボタンを「変換終了」グレーに、閉じるを「フォルダを開く」に変える"""
-        self.convert_btn.config(
-            text="変換終了", command=lambda: None,
-            bg="#c7c7cc", fg="#8e8e93",
-            activebackground="#c7c7cc", activeforeground="#8e8e93",
-            cursor="arrow",
-        )
-        self.convert_btn.unbind("<Enter>")
-        self.convert_btn.unbind("<Leave>")
+        """変換完了後: 変換開始を再有効化、フォルダを開くボタンを表示"""
+        self.convert_btn.config(state="normal")
 
         folder = self.dir_var.get() or ""
-        self.close_btn.config(
-            text="フォルダを開く",
-            command=lambda: self._open_folder(folder),
-            bg=ACCENT, fg="white",
-            activebackground=ACCENT_H, activeforeground="white",
-        )
-        self.close_btn.unbind("<Enter>")
-        self.close_btn.unbind("<Leave>")
-        self.close_btn.bind("<Enter>", lambda _: self.close_btn.config(bg=ACCENT_H))
-        self.close_btn.bind("<Leave>", lambda _: self.close_btn.config(bg=ACCENT))
+        self.folder_btn.config(command=lambda: self._open_folder(folder))
+        # 閉じるの前に挿入
+        self.close_btn.pack_forget()
+        self.folder_btn.pack(side="left", padx=(0, 8))
+        self.close_btn.pack(side="left")
 
     def _open_folder(self, folder: str):
-        folder = os.path.normpath(folder)  # / → \ に統一
+        folder = os.path.normpath(folder)
         if folder and os.path.isdir(folder):
             os.startfile(folder)
 
