@@ -33,6 +33,9 @@ convert_to_webp/
 
 ### インストール
 
+`WebP_Converter_Setup.exe` は GitHub Releases からダウンロードできます。
+https://github.com/git-kmek-official-org/convert_to_webp/releases/latest
+
 1. `WebP_Converter_Setup.exe` をダブルクリック
 2. インストール先が表示される（変更不可・固定）
 3. ショートカットのオプションを選んで「インストール」をクリック
