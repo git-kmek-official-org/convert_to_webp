@@ -5,10 +5,36 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image
 
-SUPPORTED_EXTS = ("*.jpg", "*.jpeg", "*.gif", "*.png",
-                  "*.JPG", "*.JPEG", "*.GIF", "*.PNG")
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    _HEIC_AVAILABLE = True
+except ImportError:
+    _HEIC_AVAILABLE = False
+
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPM
+    _SVG_AVAILABLE = True
+except ImportError:
+    _SVG_AVAILABLE = False
+
+SVG_DPI = 96  # SVG レンダリング解像度 (Web 標準 96dpi)
+
+SUPPORTED_EXTS = (
+    "*.jpg", "*.jpeg", "*.gif", "*.png",
+    "*.bmp", "*.tif", "*.tiff",
+    "*.svg",
+    "*.heic", "*.heif",
+    "*.JPG", "*.JPEG", "*.GIF", "*.PNG",
+    "*.BMP", "*.TIF", "*.TIFF",
+    "*.SVG",
+    "*.HEIC", "*.HEIF",
+)
 IMAGE_FILTER = [
-    ("画像ファイル", "*.jpg *.jpeg *.gif *.png *.JPG *.JPEG *.GIF *.PNG"),
+    ("画像ファイル",
+     "*.jpg *.jpeg *.gif *.png *.bmp *.tif *.tiff *.svg *.heic *.heif "
+     "*.JPG *.JPEG *.GIF *.PNG *.BMP *.TIF *.TIFF *.SVG *.HEIC *.HEIF"),
     ("すべてのファイル", "*.*"),
 ]
 WEBP_QUALITY = 90
@@ -112,7 +138,7 @@ class App(tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text="WebP Converter", bg=SURFACE, fg=FG,
                  font=(FONT, 14, "bold")).pack(side="left", padx=18)
-        tk.Label(hdr, text="JPG / PNG / GIF → WebP", bg=SURFACE, fg=FG_DIM,
+        tk.Label(hdr, text="JPG / PNG / GIF / BMP / TIFF / SVG / HEIC → WebP", bg=SURFACE, fg=FG_DIM,
                  font=(FONT, 9)).pack(side="left")
 
         # ── フッター（常に表示・先にパック） ────────────────
@@ -306,7 +332,7 @@ class App(tk.Tk):
             self._set_files(files)
         else:
             self.dir_var.set(path)
-            self.status_var.set("対象ファイルなし (jpg/jpeg/gif/png)")
+            self.status_var.set("対象ファイルなし (jpg/png/gif/bmp/tiff/svg/heic)")
 
     def _set_files(self, files: list[str]):
         first_dir = os.path.dirname(files[0]) if files else ""
@@ -341,7 +367,16 @@ class App(tk.Tk):
             out = unique_webp_path(base)
             out_name = os.path.basename(out)
             try:
-                img = Image.open(src)
+                ext = os.path.splitext(src)[1].lower()
+                if ext == ".svg":
+                    if not _SVG_AVAILABLE:
+                        raise ImportError("svglib がインストールされていません")
+                    drawing = svg2rlg(src)
+                    if drawing is None:
+                        raise ValueError("SVG の読み込みに失敗しました")
+                    img = renderPM.drawToPIL(drawing, dpi=SVG_DPI)
+                else:
+                    img = Image.open(src)
                 if img.mode in ("RGBA", "LA", "P"):
                     img = img.convert("RGBA")
                 else:
