@@ -3,6 +3,11 @@ import glob
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import xml.etree.ElementTree as ET
+import base64
+import io
+import re
+import tempfile
 from PIL import Image
 
 try:
@@ -20,6 +25,7 @@ except ImportError:
     _SVG_AVAILABLE = False
 
 SVG_DPI = 96  # SVG レンダリング解像度 (Web 標準 96dpi)
+SVG_CURRENT_COLOR = "#000000"  # currentColor のフォールバック値
 
 SUPPORTED_EXTS = (
     "*.jpg", "*.jpeg", "*.gif", "*.png",
@@ -76,6 +82,185 @@ def find_images(directory: str) -> list[str]:
             seen.add(key)
             result.append(f)
     return sorted(result)
+
+
+def _try_extract_svg_images(svg_text: str) -> "Image.Image | None":
+    """SVG内の埋め込みラスター画像を抽出してPIL Imageに合成する。
+
+    Figmaなどが出力する fill="url(#patternN)" 形式のSVGに対応。
+    パターン塗りが見つからない場合や解析失敗時はNoneを返す。
+    """
+    SVG_NS   = "http://www.w3.org/2000/svg"
+    XLINK_NS = "http://www.w3.org/1999/xlink"
+
+    def qtag(local: str) -> str:
+        return f"{{{SVG_NS}}}{local}"
+
+    def get_href(elem) -> str:
+        return (elem.get(f"{{{XLINK_NS}}}href")
+                or elem.get("href") or "")
+
+    def decode_data_uri(href: str) -> "Image.Image | None":
+        if not href.startswith("data:"):
+            return None
+        try:
+            _, b64 = href.split(",", 1)
+            return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
+        except Exception:
+            return None
+
+    def get_float(elem, attr: str, default: float = 0.0) -> float:
+        val = elem.get(attr)
+        if val is None:
+            return default
+        val = re.sub(r"[a-zA-Z%\s]+$", "", val.strip())
+        try:
+            return float(val)
+        except ValueError:
+            return default
+
+    try:
+        root = ET.fromstring(svg_text.encode("utf-8"))
+    except ET.ParseError:
+        return None
+
+    # キャンバスサイズ
+    vb = root.get("viewBox", "")
+    cw = get_float(root, "width", 0)
+    ch = get_float(root, "height", 0)
+    if vb:
+        parts = re.split(r"[\s,]+", vb.strip())
+        if len(parts) == 4:
+            if cw == 0:
+                cw = float(parts[2])
+            if ch == 0:
+                ch = float(parts[3])
+    if cw <= 0 or ch <= 0:
+        return None
+
+    # <image id="..."> を収集（defs 内の参照用）
+    images_by_id: dict[str, Image.Image] = {}
+    for img_elem in root.iter(qtag("image")):
+        img_id = img_elem.get("id")
+        if img_id:
+            pil = decode_data_uri(get_href(img_elem))
+            if pil:
+                images_by_id[img_id] = pil
+
+    # <pattern> → PIL Image のマップを構築
+    pattern_img: dict[str, Image.Image] = {}
+    for pat in root.iter(qtag("pattern")):
+        pat_id = pat.get("id")
+        if not pat_id:
+            continue
+        for child in pat:
+            local = child.tag.split("}")[-1]
+            if local == "image":
+                pil = decode_data_uri(get_href(child))
+                if pil:
+                    pattern_img[pat_id] = pil
+                    break
+            elif local == "use":
+                ref = get_href(child)
+                if ref.startswith("#") and ref[1:] in images_by_id:
+                    pattern_img[pat_id] = images_by_id[ref[1:]]
+                    break
+
+    if not pattern_img:
+        return None  # パターン塗りなし → svglib に任せる
+
+    canvas = Image.new("RGBA", (int(cw), int(ch)), (255, 255, 255, 255))
+    found_any = False
+
+    def fill_pattern_id(elem) -> "str | None":
+        for src in (elem.get("fill", ""),
+                    re.search(r"fill\s*:\s*([^;]+)", elem.get("style", "") or "")):
+            val = src if isinstance(src, str) else (src.group(1) if src else "")
+            m = re.match(r"url\(#([^)]+)\)", val.strip())
+            if m:
+                return m.group(1)
+        return None
+
+    def shape_bbox(elem) -> tuple[float, float, float, float]:
+        local = elem.tag.split("}")[-1]
+        if local == "rect":
+            return (get_float(elem, "x", 0), get_float(elem, "y", 0),
+                    get_float(elem, "width", cw), get_float(elem, "height", ch))
+        if local in ("circle", "ellipse"):
+            cx = get_float(elem, "cx", cw / 2)
+            cy = get_float(elem, "cy", ch / 2)
+            rx = get_float(elem, "rx", 0) or get_float(elem, "r", 0)
+            ry = get_float(elem, "ry", 0) or get_float(elem, "r", 0)
+            return (cx - rx, cy - ry, rx * 2, ry * 2)
+        return (0, 0, cw, ch)  # path など → キャンバス全体で近似
+
+    for elem in root.iter():
+        pid = fill_pattern_id(elem)
+        if pid not in pattern_img:
+            continue
+        x, y, rw, rh = shape_bbox(elem)
+        if rw <= 0 or rh <= 0:
+            continue
+        scaled = pattern_img[pid].resize(
+            (max(1, int(rw)), max(1, int(rh))), Image.LANCZOS)
+        canvas.paste(scaled, (int(x), int(y)), scaled)
+        found_any = True
+
+    # defs 外の直接 <image> 要素も処理
+    defs_img_ids: set[str] = set()
+    defs_elem = root.find(qtag("defs"))
+    if defs_elem is not None:
+        for e in defs_elem.iter(qtag("image")):
+            if e.get("id"):
+                defs_img_ids.add(e.get("id"))
+    for img_elem in root.iter(qtag("image")):
+        if img_elem.get("id") in defs_img_ids:
+            continue
+        pil = decode_data_uri(get_href(img_elem))
+        if not pil:
+            continue
+        x   = get_float(img_elem, "x", 0)
+        y   = get_float(img_elem, "y", 0)
+        iw  = get_float(img_elem, "width",  pil.width)
+        ih  = get_float(img_elem, "height", pil.height)
+        scaled = pil.resize((max(1, int(iw)), max(1, int(ih))), Image.LANCZOS)
+        canvas.paste(scaled, (int(x), int(y)), scaled)
+        found_any = True
+
+    return canvas if found_any else None
+
+
+def _svg_to_pil(src: str) -> Image.Image:
+    """SVGファイルをPIL Imageに変換する。
+
+    優先順位:
+    1. 埋め込みラスター画像の抽出（pattern塗り対応）
+    2. svglib によるベクター描画
+    """
+    with open(src, "r", encoding="utf-8", errors="replace") as f:
+        svg_text = f.read()
+    svg_text = svg_text.replace("currentColor", SVG_CURRENT_COLOR)
+
+    img = _try_extract_svg_images(svg_text)
+    if img is not None:
+        return img
+
+    if not _SVG_AVAILABLE:
+        raise ImportError("svglib がインストールされていません")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".svg", delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(svg_text)
+        tmp_path = tf.name
+    try:
+        drawing = svg2rlg(tmp_path)
+    finally:
+        os.remove(tmp_path)
+    if drawing is None:
+        raise ValueError("SVG の読み込みに失敗しました")
+    if drawing.width == 0 or drawing.height == 0:
+        raise ValueError("SVG のサイズが 0 です (width/height または viewBox を確認してください)")
+    return renderPM.drawToPIL(drawing, dpi=SVG_DPI)
 
 
 class App(tk.Tk):
@@ -138,7 +323,7 @@ class App(tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text="WebP Converter", bg=SURFACE, fg=FG,
                  font=(FONT, 14, "bold")).pack(side="left", padx=18)
-        tk.Label(hdr, text="JPG / PNG / GIF / BMP / TIFF / SVG / HEIC → WebP", bg=SURFACE, fg=FG_DIM,
+        tk.Label(hdr, text="JPG / PNG / GIF / BMP / TIFF / HEIC → WebP", bg=SURFACE, fg=FG_DIM,
                  font=(FONT, 9)).pack(side="left")
 
         # ── フッター（常に表示・先にパック） ────────────────
@@ -332,7 +517,7 @@ class App(tk.Tk):
             self._set_files(files)
         else:
             self.dir_var.set(path)
-            self.status_var.set("対象ファイルなし (jpg/png/gif/bmp/tiff/svg/heic)")
+            self.status_var.set("対象ファイルなし (jpg/png/gif/bmp/tiff/heic)")
 
     def _set_files(self, files: list[str]):
         first_dir = os.path.dirname(files[0]) if files else ""
@@ -369,12 +554,7 @@ class App(tk.Tk):
             try:
                 ext = os.path.splitext(src)[1].lower()
                 if ext == ".svg":
-                    if not _SVG_AVAILABLE:
-                        raise ImportError("svglib がインストールされていません")
-                    drawing = svg2rlg(src)
-                    if drawing is None:
-                        raise ValueError("SVG の読み込みに失敗しました")
-                    img = renderPM.drawToPIL(drawing, dpi=SVG_DPI)
+                    img = _svg_to_pil(src)
                 else:
                     img = Image.open(src)
                 if img.mode in ("RGBA", "LA", "P"):
